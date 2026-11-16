@@ -1,0 +1,703 @@
+import React, { useState, useMemo } from 'react';
+import { 
+  Trophy, 
+  Crown, 
+  Medal, 
+  Download, 
+  Search, 
+  Phone, 
+  Receipt, 
+  ExternalLink,
+  Sparkles,
+  Eye,
+} from 'lucide-react';
+import { CustomerBenefitType, CustomerMaster, CustomerSummary, Invoice } from '../types/cashback';
+import { formatRupiah, getBenefitLabel, getBenefitBadgeClasses } from '../utils/cashbackCalculator';
+import { aggregateCustomerSummaries, parseLocalYmdDate } from '../utils/storage';
+import { PaginationBar } from './PaginationBar';
+
+interface Top10LeaderboardProps {
+  customerSummaries: CustomerSummary[];
+  invoices: Invoice[];
+  masterCustomers?: CustomerMaster[];
+  excludedCustomerNames?: string[];
+  benefitOverrides?: Record<string, CustomerBenefitType>;
+  minSpendForParcel?: number;
+  onSelectCustomer: (customerName: string) => void;
+  onExportExcel?: () => void;
+  isReadOnly?: boolean;
+}
+
+export const Top10Leaderboard: React.FC<Top10LeaderboardProps> = ({
+  customerSummaries,
+  invoices,
+  masterCustomers = [],
+  excludedCustomerNames = [],
+  benefitOverrides = {},
+  minSpendForParcel = 5000000,
+  onSelectCustomer,
+  onExportExcel,
+  isReadOnly = false,
+}) => {
+  const [periodFilter, setPeriodFilter] = useState<'all' | 'this_month' | 'last_month'>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [rowsPerPage, setRowsPerPage] = useState<number | 'all'>(10);
+  const [currentPage, setCurrentPage] = useState(1);
+
+  // Filter invoices based on period if selected, then recalculate rankings excluding disqualified consumers
+  const rankedData = useMemo(() => {
+    if (periodFilter === 'all') {
+      const list = customerSummaries.filter((c) => !c.isExcludedFromCashback && c.totalCashback > 0);
+      list.sort((a, b) => b.totalCashback - a.totalCashback);
+      return list.map((item, idx) => ({ ...item, rank: idx + 1 }));
+    }
+
+    let filteredInvoices = invoices;
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth(); // 0-indexed
+
+    if (periodFilter === 'this_month') {
+      filteredInvoices = invoices.filter((inv) => {
+        const d = parseLocalYmdDate(inv.date);
+        return d ? d.getFullYear() === currentYear && d.getMonth() === currentMonth : false;
+      });
+    } else if (periodFilter === 'last_month') {
+      const lastMonthDate = new Date(currentYear, currentMonth - 1, 1);
+      const targetYear = lastMonthDate.getFullYear();
+      const targetMonth = lastMonthDate.getMonth();
+      filteredInvoices = invoices.filter((inv) => {
+        const d = parseLocalYmdDate(inv.date);
+        return d ? d.getFullYear() === targetYear && d.getMonth() === targetMonth : false;
+      });
+    }
+
+    const aggregated = aggregateCustomerSummaries(
+      filteredInvoices,
+      minSpendForParcel,
+      masterCustomers,
+      excludedCustomerNames,
+      benefitOverrides
+    ).filter((c) => !c.isExcludedFromCashback && c.totalCashback > 0);
+    aggregated.sort((a, b) => b.totalCashback - a.totalCashback);
+    return aggregated.map((item, idx) => ({ ...item, rank: idx + 1 }));
+  }, [invoices, customerSummaries, periodFilter, minSpendForParcel, masterCustomers, excludedCustomerNames, benefitOverrides]);
+
+  // Filtered leaderboard items (default displays Top 10 via rowsPerPage=10, user can change rows per page)
+  const filteredRanked = useMemo(() => {
+    if (!searchQuery.trim()) return rankedData;
+    const q = searchQuery.toLowerCase();
+    return rankedData.filter(
+      (c) =>
+        c.customerName.toLowerCase().includes(q) ||
+        c.customerPhone.toLowerCase().includes(q)
+    );
+  }, [rankedData, searchQuery]);
+
+  const top10 = useMemo(() => {
+    if (rowsPerPage === 'all') return filteredRanked;
+    const totalPages = Math.max(1, Math.ceil(filteredRanked.length / rowsPerPage));
+    const safePage = Math.min(Math.max(1, currentPage), totalPages);
+    const start = (safePage - 1) * rowsPerPage;
+    return filteredRanked.slice(start, start + rowsPerPage);
+  }, [filteredRanked, rowsPerPage, currentPage]);
+
+  const top1 = rankedData[0];
+  const top2 = rankedData[1];
+  const top3 = rankedData[2];
+
+  const totalTop10Cashback = useMemo(() => {
+    return rankedData.slice(0, 10).reduce((sum, c) => sum + c.totalCashback, 0);
+  }, [rankedData]);
+
+  const totalTop10Purchase = useMemo(() => {
+    return rankedData.slice(0, 10).reduce((sum, c) => sum + c.totalPurchase, 0);
+  }, [rankedData]);
+
+  const maxCashback = top1 ? top1.totalCashback : 1;
+
+  // Open WhatsApp template for rewarding consumer
+  const handleContactWhatsApp = (phone: string, name: string, cashback: number) => {
+    const cleanPhone = phone.replace(/\D/g, '');
+    const formattedPhone = cleanPhone.startsWith('0') ? '62' + cleanPhone.slice(1) : cleanPhone;
+    const message = encodeURIComponent(
+      `Halo Kak ${name},\nTerima kasih atas loyalitas belanja di toko kami! Anda masuk dalam daftar 10 Besar Konsumen dengan cashback tertinggi sebesar ${formatRupiah(cashback)}. Silakan hubungi kami untuk konfirmasi pencairan cashback Anda. Terima kasih!`
+    );
+    const url = `https://wa.me/${formattedPhone}?text=${message}`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  return (
+    <div className="space-y-6">
+
+      {isReadOnly && (
+        <div className="px-3.5 py-2.5 rounded-xl bg-slate-100 border border-slate-200 flex items-center gap-2 text-xs text-slate-700">
+          <Eye className="w-4 h-4 text-emerald-700 shrink-0" />
+          <span>
+            <strong>Mode Lihat Saja (Petugas)</strong> — Halaman Peringkat 10 Besar hanya dapat dilihat (tidak dapat mengubah data).
+          </span>
+        </div>
+      )}
+      
+      {/* Header and Controls */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <div className="p-2 bg-amber-50 rounded-lg text-amber-600">
+                <Trophy className="w-5 h-5" />
+              </div>
+              <h1 className="text-lg font-bold text-slate-900">
+                Rekap 10 Besar Cashback Tertinggi
+              </h1>
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Peringkat konsumen dengan akumulasi reward cashback paling tinggi di toko Anda
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Period Segmented Filter */}
+            <div className="flex items-center p-1 bg-slate-100 rounded-lg">
+              <button
+                onClick={() => {
+                  setPeriodFilter('all');
+                  setCurrentPage(1);
+                }}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+                  periodFilter === 'all'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Semua Waktu
+              </button>
+              <button
+                onClick={() => {
+                  setPeriodFilter('this_month');
+                  setCurrentPage(1);
+                }}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+                  periodFilter === 'this_month'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Bulan Ini
+              </button>
+              <button
+                onClick={() => {
+                  setPeriodFilter('last_month');
+                  setCurrentPage(1);
+                }}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+                  periodFilter === 'last_month'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Bulan Lalu
+              </button>
+            </div>
+
+            {!isReadOnly && onExportExcel && (
+              <button
+                onClick={onExportExcel}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export Top 10</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Aggregate Stats Banner for Top 10 */}
+        <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+          <div>
+            <span className="text-slate-500">Total Cashback 10 Besar</span>
+            <div className="text-base font-bold text-slate-900 font-mono tabular-nums mt-0.5">
+              {formatRupiah(totalTop10Cashback)}
+            </div>
+          </div>
+          <div>
+            <span className="text-slate-500">Total Belanja 10 Besar</span>
+            <div className="text-base font-bold text-slate-900 font-mono tabular-nums mt-0.5">
+              {formatRupiah(totalTop10Purchase)}
+            </div>
+          </div>
+          <div>
+            <span className="text-slate-500">Rata-rata per Konsumen Top 10</span>
+            <div className="text-base font-bold text-emerald-700 font-mono tabular-nums mt-0.5">
+              {formatRupiah(rankedData.length > 0 ? totalTop10Cashback / Math.min(rankedData.length, 10) : 0)}
+            </div>
+          </div>
+          <div>
+            <span className="text-slate-500">Jumlah Data Memenuhi</span>
+            <div className="text-base font-bold text-slate-900 font-mono tabular-nums mt-0.5">
+              {Math.min(rankedData.length, 10)} dari {rankedData.length} Konsumen
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Podium Section for Top 3 */}
+      {top1 && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          
+          {/* Rank 2 (Silver) */}
+          {top2 ? (
+            <div className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between order-2 md:order-1 relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-24 h-24 bg-slate-100 rounded-full -mr-8 -mt-8 pointer-events-none" />
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="w-9 h-9 rounded-full bg-slate-200 text-slate-800 flex items-center justify-center font-bold text-sm">
+                    #2
+                  </div>
+                  <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
+                    <Medal className="w-4 h-4 text-slate-400" /> Juara 2
+                  </span>
+                </div>
+                <h2 className="text-base font-bold text-slate-900">{top2.customerName}</h2>
+                <p className="text-xs text-slate-500 font-mono tabular-nums mt-0.5">{top2.customerPhone}</p>
+
+                <div className="mt-4 p-3 bg-slate-50 rounded-lg space-y-1.5 font-mono tabular-nums text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-sans">Total Cashback:</span>
+                    <span className="font-bold text-emerald-700">{formatRupiah(top2.totalCashback)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-sans">Total Belanja:</span>
+                    <span className="text-slate-800">{formatRupiah(top2.totalPurchase)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-sans">Frekuensi:</span>
+                    <span className="text-slate-800">{top2.invoiceCount} Transaksi</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
+                <button
+                  onClick={() => onSelectCustomer(top2.customerName)}
+                  className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 flex items-center gap-1"
+                >
+                  <Receipt className="w-3.5 h-3.5" /> Lihat Faktur
+                </button>
+                <button
+                  onClick={() => handleContactWhatsApp(top2.customerPhone, top2.customerName, top2.totalCashback)}
+                  className="text-xs font-semibold text-slate-700 hover:text-slate-900 flex items-center gap-1"
+                  title="Kirim pesan ucapan selamat & reward via WhatsApp"
+                >
+                  <Phone className="w-3.5 h-3.5 text-emerald-600" /> WhatsApp
+                </button>
+              </div>
+            </div>
+          ) : <div className="order-2 md:order-1" />}
+
+          {/* Rank 1 (Gold) - Elevated Visual Anchor */}
+          <div className="bg-white rounded-xl border-2 border-amber-300 p-5 flex flex-col justify-between order-1 md:order-2 shadow-sm relative overflow-hidden bg-gradient-to-b from-amber-50/40 to-white">
+            <div className="absolute top-2 right-2 text-amber-400">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <div className="w-10 h-10 rounded-full bg-amber-400 text-amber-950 flex items-center justify-center font-black text-base shadow-xs">
+                  #1
+                </div>
+                <span className="text-xs font-bold text-amber-800 flex items-center gap-1 bg-amber-100/80 px-2.5 py-1 rounded-md">
+                  <Crown className="w-4 h-4 text-amber-600" /> Juara 1 Utama
+                </span>
+              </div>
+              <h2 className="text-lg font-extrabold text-slate-900">{top1.customerName}</h2>
+              <p className="text-xs text-slate-500 font-mono tabular-nums mt-0.5">{top1.customerPhone}</p>
+
+              <div className="mt-4 p-3.5 bg-amber-100/40 rounded-lg space-y-2 font-mono tabular-nums text-xs border border-amber-200/50">
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-600 font-sans text-xs">Total Cashback:</span>
+                  <span className="font-extrabold text-emerald-700 text-sm">{formatRupiah(top1.totalCashback)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-600 font-sans">Total Belanja:</span>
+                  <span className="font-bold text-slate-900">{formatRupiah(top1.totalPurchase)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-600 font-sans">Total Transaksi:</span>
+                  <span className="text-slate-900">{top1.invoiceCount} Faktur</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-amber-200/50 flex items-center justify-between">
+              <button
+                onClick={() => onSelectCustomer(top1.customerName)}
+                className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1"
+              >
+                <Receipt className="w-3.5 h-3.5" /> Riwayat Faktur
+              </button>
+              <button
+                onClick={() => handleContactWhatsApp(top1.customerPhone, top1.customerName, top1.totalCashback)}
+                className="px-2.5 py-1 text-xs font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 rounded-md transition-colors flex items-center gap-1"
+              >
+                <Phone className="w-3.5 h-3.5" /> Hubungi WhatsApp
+              </button>
+            </div>
+          </div>
+
+          {/* Rank 3 (Bronze) */}
+          {top3 ? (
+            <div className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between order-3 relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-24 h-24 bg-amber-50 rounded-full -mr-8 -mt-8 pointer-events-none" />
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="w-9 h-9 rounded-full bg-amber-700/80 text-white flex items-center justify-center font-bold text-sm">
+                    #3
+                  </div>
+                  <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
+                    <Medal className="w-4 h-4 text-amber-700" /> Juara 3
+                  </span>
+                </div>
+                <h2 className="text-base font-bold text-slate-900">{top3.customerName}</h2>
+                <p className="text-xs text-slate-500 font-mono tabular-nums mt-0.5">{top3.customerPhone}</p>
+
+                <div className="mt-4 p-3 bg-slate-50 rounded-lg space-y-1.5 font-mono tabular-nums text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-sans">Total Cashback:</span>
+                    <span className="font-bold text-emerald-700">{formatRupiah(top3.totalCashback)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-sans">Total Belanja:</span>
+                    <span className="text-slate-800">{formatRupiah(top3.totalPurchase)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-sans">Frekuensi:</span>
+                    <span className="text-slate-800">{top3.invoiceCount} Transaksi</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
+                <button
+                  onClick={() => onSelectCustomer(top3.customerName)}
+                  className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 flex items-center gap-1"
+                >
+                  <Receipt className="w-3.5 h-3.5" /> Lihat Faktur
+                </button>
+                <button
+                  onClick={() => handleContactWhatsApp(top3.customerPhone, top3.customerName, top3.totalCashback)}
+                  className="text-xs font-semibold text-slate-700 hover:text-slate-900 flex items-center gap-1"
+                >
+                  <Phone className="w-3.5 h-3.5 text-emerald-600" /> WhatsApp
+                </button>
+              </div>
+            </div>
+          ) : <div className="order-3" />}
+
+        </div>
+      )}
+
+      {/* Full Leaderboard Table (Ranks 1 to 10) */}
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        
+        {/* Table Header with Search */}
+        <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">
+              Tabel Lengkap Peringkat 10 Besar
+            </h2>
+            <p className="text-xs text-slate-500">
+              Urutan berdasarkan perolehan total cashback tertinggi
+            </p>
+          </div>
+
+          <div className="relative w-full sm:w-64">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              placeholder="Cari nama / no. HP..."
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-slate-900"
+            />
+          </div>
+        </div>
+
+        {/* Mobile View: Minimalist Cards for Top 10 */}
+        <div className="md:hidden divide-y divide-slate-100">
+          {top10.length === 0 ? (
+            <div className="p-8 text-center text-slate-400">
+              <p className="text-sm font-semibold text-slate-600">Tidak ada konsumen ditemukan</p>
+            </div>
+          ) : (
+            top10.map((cust, idx) => (
+              <div key={cust.customerCode || `${cust.customerName}_${idx}`} className="p-3.5 space-y-2.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <span
+                      className={`inline-flex items-center justify-center w-7 h-7 rounded-full font-bold text-xs shrink-0 ${
+                        cust.rank === 1
+                          ? 'bg-amber-400 text-amber-950 font-black shadow-xs'
+                          : cust.rank === 2
+                          ? 'bg-slate-300 text-slate-900 font-bold'
+                          : cust.rank === 3
+                          ? 'bg-amber-700/80 text-white font-bold'
+                          : 'bg-slate-100 text-slate-700 font-semibold'
+                      }`}
+                    >
+                      #{cust.rank}
+                    </span>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">{cust.customerName}</h3>
+                      <p className="text-[11px] text-slate-500 font-mono">{cust.customerPhone}</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1">
+                    {(() => {
+                      const bClasses = getBenefitBadgeClasses(cust.benefitType);
+                      return (
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border flex items-center gap-1 ${bClasses.bg} ${bClasses.border}`}>
+                          <span className={`w-1 h-1 rounded-full ${bClasses.dot}`} />
+                          {getBenefitLabel(cust.benefitType)}
+                        </span>
+                      );
+                    })()}
+                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700">
+                      {cust.tier}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Amount Box */}
+                <div className="grid grid-cols-2 gap-2 p-2.5 bg-slate-50 rounded-lg text-xs font-mono tabular-nums">
+                  <div>
+                    <span className="text-[10px] text-slate-500 font-sans block">Total Belanja</span>
+                    <span className="font-semibold text-slate-800">{formatRupiah(cust.totalPurchase)}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] text-slate-500 font-sans block">Total Cashback</span>
+                    <span className="font-bold text-emerald-700 text-sm">{formatRupiah(cust.totalCashback)}</span>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center justify-between text-xs pt-1">
+                  <span className="text-[11px] text-slate-400 font-mono">
+                    {cust.invoiceCount} transaksi
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => onSelectCustomer(cust.customerName)}
+                      className="flex items-center gap-1 px-2.5 py-1 font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors"
+                    >
+                      <Receipt className="w-3.5 h-3.5" />
+                      <span>Faktur</span>
+                    </button>
+                    <button
+                      onClick={() => handleContactWhatsApp(cust.customerPhone, cust.customerName, cust.totalCashback)}
+                      className="flex items-center gap-1 px-2.5 py-1 font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                    >
+                      <Phone className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>WA</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Desktop Table (hidden on mobile, visible on desktop) */}
+        <div className="hidden md:block overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-slate-50/70 border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                <th className="py-3 px-4 w-16 text-center">Rank</th>
+                <th className="py-3 px-4">Konsumen</th>
+                <th className="py-3 px-4 text-right">Total Belanja</th>
+                <th className="py-3 px-4 text-right">Total Cashback</th>
+                <th className="py-3 px-4 text-center">Paket Diterima</th>
+                <th className="py-3 px-4">Kontribusi Relatif</th>
+                <th className="py-3 px-4 text-center">Jml Faktur</th>
+                <th className="py-3 px-4 text-center">Tier</th>
+                <th className="py-3 px-4 text-right">Aksi</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-xs">
+              {top10.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="py-8 text-center text-slate-400">
+                    Tidak ada konsumen yang sesuai dengan filter.
+                  </td>
+                </tr>
+              ) : (
+                top10.map((cust, idx) => {
+                  const percentOfTop = maxCashback > 0 ? (cust.totalCashback / maxCashback) * 100 : 0;
+                  const isTop3 = (cust.rank ?? 99) <= 3;
+
+                  return (
+                    <tr 
+                      key={cust.customerCode || `${cust.customerName}_${idx}`}
+                      className="hover:bg-slate-50/80 transition-colors"
+                    >
+                      {/* Rank badge */}
+                      <td className="py-3.5 px-4 text-center">
+                        <span
+                          className={`inline-flex items-center justify-center w-6 h-6 rounded-full font-bold text-xs ${
+                            cust.rank === 1
+                              ? 'bg-amber-400 text-amber-950 font-black'
+                              : cust.rank === 2
+                              ? 'bg-slate-300 text-slate-900'
+                              : cust.rank === 3
+                              ? 'bg-amber-700/80 text-white'
+                              : 'bg-slate-100 text-slate-600'
+                          }`}
+                        >
+                          {cust.rank}
+                        </span>
+                      </td>
+
+                      {/* Customer Info */}
+                      <td className="py-3.5 px-4">
+                        <div className="font-bold text-slate-900">{cust.customerName}</div>
+                        <div className="text-[11px] text-slate-500 font-mono tabular-nums flex items-center gap-1.5 mt-0.5">
+                          <span>{cust.customerPhone}</span>
+                          <span aria-hidden="true">·</span>
+                          <span>Terakhir: {cust.lastPurchaseDate}</span>
+                        </div>
+                      </td>
+
+                      {/* Total Purchase */}
+                      <td className="py-3.5 px-4 text-right font-mono tabular-nums text-slate-800 font-medium">
+                        {formatRupiah(cust.totalPurchase)}
+                      </td>
+
+                      {/* Total Cashback */}
+                      <td className="py-3.5 px-4 text-right font-mono tabular-nums font-bold text-emerald-700">
+                        {formatRupiah(cust.totalCashback)}
+                      </td>
+
+                      {/* Paket Diterima (Benefit Package) */}
+                      <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                        {(() => {
+                          const bClasses = getBenefitBadgeClasses(cust.benefitType);
+                          return (
+                            <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border shadow-2xs ${bClasses.bg} ${bClasses.border}`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${bClasses.dot}`} />
+                              {getBenefitLabel(cust.benefitType)}
+                            </span>
+                          );
+                        })()}
+                      </td>
+
+                      {/* Relative Contribution Bar */}
+                      <td className="py-3.5 px-4 w-44">
+                        <div className="space-y-1">
+                          <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${
+                                isTop3 ? 'bg-amber-500' : 'bg-emerald-600'
+                              }`}
+                              style={{ width: `${Math.max(8, percentOfTop)}%` }}
+                            />
+                          </div>
+                          <div className="flex justify-between text-[10px] text-slate-400 font-mono tabular-nums">
+                            <span>{percentOfTop.toFixed(0)}% dari #1</span>
+                            <span>{((cust.totalCashback / cust.totalPurchase) * 100).toFixed(1)}% rasio</span>
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* Invoice count */}
+                      <td className="py-3.5 px-4 text-center font-mono tabular-nums text-slate-700">
+                        {cust.invoiceCount}
+                      </td>
+
+                      {/* Loyalty Tier */}
+                      <td className="py-3.5 px-4 text-center">
+                        <span
+                          className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded ${
+                            cust.tier === 'Platinum'
+                              ? 'bg-purple-50 text-purple-700 border border-purple-200'
+                              : cust.tier === 'Gold'
+                              ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                              : cust.tier === 'Silver'
+                              ? 'bg-slate-100 text-slate-700 border border-slate-200'
+                              : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          }`}
+                        >
+                          {cust.tier}
+                        </span>
+                      </td>
+
+                      {/* Actions */}
+                      <td className="py-3.5 px-4 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            onClick={() => onSelectCustomer(cust.customerName)}
+                            title="Lihat riwayat faktur konsumen ini"
+                            className="p-1.5 text-slate-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-md transition-colors"
+                          >
+                            <Receipt className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleContactWhatsApp(cust.customerPhone, cust.customerName, cust.totalCashback)}
+                            title="Hubungi via WhatsApp"
+                            className="p-1.5 text-slate-600 hover:text-emerald-600 hover:bg-emerald-50 rounded-md transition-colors"
+                          >
+                            <Phone className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Pagination & Footer info */}
+        <div className="p-3 border-t border-slate-100 bg-slate-50 space-y-2.5">
+          <PaginationBar
+            totalItems={filteredRanked.length}
+            rowsPerPage={rowsPerPage}
+            currentPage={currentPage}
+            onChangeRowsPerPage={(rows) => {
+              setRowsPerPage(rows);
+              setCurrentPage(1);
+            }}
+            onChangePage={setCurrentPage}
+            itemLabel="konsumen"
+            options={[5, 10, 20, 50]}
+          />
+          <div className="px-1 flex flex-col sm:flex-row sm:items-center justify-between text-xs text-slate-500 gap-2">
+            <span>
+              Menampilkan peringkat konsumen berdasarkan cashback kumulatif tertinggi (default 10 Besar).
+            </span>
+            {!isReadOnly && onExportExcel && (
+              <button
+                onClick={onExportExcel}
+                className="text-emerald-700 hover:text-emerald-800 font-semibold flex items-center gap-1 self-start sm:self-auto"
+              >
+                <span>Unduh Laporan Excel Top 10</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  );
+};
